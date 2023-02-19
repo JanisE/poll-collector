@@ -1,0 +1,4 @@
+Parādīt katrai atbildei, cik par tādu ir atbildējuši
+Katram dalībniekam, kad uzbrauc ar peli, parādīt viņa atbildes
+Kā skaitīt laiku, ja daļas pieejamas viena pēc otras
+jautājumi ir alfabēta secībā, nevis kā anketā

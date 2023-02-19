@@ -1,0 +1,284 @@
+<!DOCTYPE html>
+<html>
+<head>
+	<meta charset='utf-8'>
+	<title>Aptaujas rezultātu apkopošana</title>
+	<meta name='viewport' content='width=device-width, initial-scale=1'>
+	<style>
+		button, div, h2, td, th {
+			font-family: Arial, sans-serif;
+		}
+		table {
+			border-collapse: collapse;
+		}
+		td {
+			padding: 1px 5px;
+		}
+		#all_answers tr {
+			border-bottom: solid 1px #cccccc;
+		}
+		#all_answers tr.even {
+			background: #dddddd;
+		}
+		#all_answers .is_correct {
+			text-align: right;
+		}
+		#buttons {
+			margin: 0.5rem 0;
+			text-align: center;
+		}
+		#drop_dom_element {
+			background: lightgreen;
+			padding: 10px;
+			height: 100px;
+			text-align: center;
+		}
+		#lists > tbody > tr > td {
+			vertical-align: top;
+		}
+	</style>
+</head>
+<body>
+	<div id="drop_dom_element">Ievelc balsošanas datus šeit!<br><br>Var vilkt vairākus failus reizē vai pa vienam.<br>Laika noteikšanai tiek pieņemts, ka visas aptaujas daļas ir bijušas pieejamas vienlaicīgi.</div>
+
+	<div id="buttons">
+		<!-- <button id="button_delete_votes" type="button">Dzēst iesniegtās atbildes</button>  -->
+		<button id="button_delete_all" type="button">Dzēst visus datus (arī to, kuras atbildes ir pareizās)</button>
+	</div>
+
+	<table id="lists"><tbody><tr>
+		<td style="min-width: 500px">
+			<h2>Rezultāti</h2>
+			<table>
+				<thead><th>Vieta</th><th>Dalībnieks</th><th>Pareizās<br>atbildes</th><th>Atbilžu<br>skaits</th><th>Laiks</th></thead>
+				<tbody id="voters_list"></tbody>
+			</table>
+		</td>
+		<td>
+			<h2>Iesniegtās atbildes (jānorāda pareizās)</h2>
+			<table>
+				<thead><th>Jautājums</th><th>Atbilde ir pareiza</th><th>Atbilde</th></thead>
+				<tbody id="all_answers"></tbody>
+			</table>
+		</td>
+	</tr></tbody></table>
+
+	<script src="https://code.jquery.com/jquery-3.6.3.slim.min.js"></script>
+	<script src="https://cdnjs.cloudflare.com/ajax/libs/moment.js/2.29.4/moment-with-locales.min.js"></script>
+	<script src="https://cdnjs.cloudflare.com/ajax/libs/dexie/3.2.3/dexie.min.js"></script>
+	<script src="https://cdn.sheetjs.com/xlsx-0.19.2/package/dist/xlsx.full.min.js"></script>
+	<script>
+		function normalise_answer(answer_raw){
+			return typeof answer_raw == 'string'
+				? (answer_raw.substring(answer_raw.length - 1) == ';'
+					? answer_raw.replace(/^;+/, '').replace(/;+$/, '').replaceAll(/;+/g, ';').split(';').sort().join(';')
+					: answer_raw // Do not change single-option answers.
+				)
+				: '';
+		}
+
+		async function storeInDb(json){
+			return db.open().then(async function(){
+				let sheet = json.sheets[0];
+				const header = sheet.shift();
+
+				for(const vote of sheet){
+					for(let i = 5; i < vote.length; i++){
+						const answer_normalised = normalise_answer(vote[i]);
+
+						await Promise.all([
+							db.questions.put({
+								text: header[i],
+							}).catch(function(e){
+								if(e.name == 'ConstraintError'){
+									// Ignore duplicate question inserts.
+								}
+							}),
+
+							db.answers.put({
+								question_text: header[i],
+								text: answer_normalised,
+								is_correct: false
+							}).catch(function(e){
+								if(e.name == 'ConstraintError'){
+									// Ignore duplicate answer inserts.
+								}
+							}),
+
+							db.votes.put({
+								time_voted: Math.round(vote[2].getTime() / 1000),
+								voter_name: vote[4],
+								question_text: header[i],
+								answer_raw: vote[i],
+								answer_normalised: answer_normalised,
+								source: json.fileName,
+							}).catch(function(e){
+								if(e.name == 'ConstraintError'){
+									// Ignore duplicate vote inserts.
+								}
+							}),
+						]);
+					}
+				}
+
+				outputAllAnswers();
+				refreshVoterList();
+			})
+			.catch (function(e) {
+				console.error('Kļūda, saglabājot datus:', e);
+			});
+		}
+
+		function handleDropOver(e){
+			e.preventDefault(); // Avoid opening file.
+		}
+
+		async function handleDrop(jqEvent) {
+			jqEvent.preventDefault(); // Avoid opening file.
+
+			for(const file of jqEvent.originalEvent.dataTransfer.files){
+				const data = await file.arrayBuffer();
+				const workbook = XLSX.read(data, {cellDates: true});
+
+				const sheets = [];
+				for(const sheetName of workbook.SheetNames){
+					var roa = XLSX.utils.sheet_to_json(workbook.Sheets[sheetName], {header:1});
+					if(roa.length){
+						sheets.push(roa);
+					}
+				}
+
+				await storeInDb({fileName: file.name, sheets});
+			}
+		}
+
+		function outputAllAnswers() {
+			db.answers.orderBy('[question_text+text]').toArray().then(function(answers){
+				let even = false;
+				let previouseQText = '';
+				jqAnswers = jQuery('#all_answers').empty();
+				for(const answer of answers){
+					if(answer.text){
+						if(answer.question_text != previouseQText){
+							even = !even;
+							previouseQText = answer.question_text;
+						}
+
+						const jqRow = jQuery('<tr' + (even ? ' class="even"' : '') + '>').data('id', answer.id);
+						jQuery('<td>').text(answer.question_text).appendTo(jqRow);
+
+						const jqCorrect = jQuery('<td class="is_correct"><input type="checkbox" value="1"></td>');
+						if(answer.is_correct){
+							jqCorrect.find('input').prop('checked', true);
+						}
+						jqCorrect.appendTo(jqRow);
+
+						jQuery('<td>').text(answer.text).appendTo(jqRow);
+
+						jqRow.appendTo(jqAnswers);
+					}
+					// Else: Ignore non-filled answers.
+				}
+			})
+		}
+
+		async function refreshVoterList() {
+			const uniqueVoters = await db.votes.orderBy('voter_name').uniqueKeys();
+
+			let voters = [];
+
+			for(const voter_name of uniqueVoters){
+				const votes = await db.votes.where({voter_name: voter_name}).toArray();
+				let correct_count = 0;
+				let all_count = 0;
+				let time_voted = undefined;
+				for(const vote of votes){
+					if(vote.answer_normalised){
+						all_count++;
+
+						const is_correct = await db.answers
+							.where({question_text: vote.question_text, text: vote.answer_normalised})
+							.toArray();
+						if(is_correct[0].is_correct){
+							correct_count++;
+						}
+						if(!time_voted || vote.time_voted > time_voted){
+							time_voted = vote.time_voted;
+						}
+					}
+				}
+
+				voters.push({
+					voter_name: voter_name,
+					correct_count: correct_count,
+					all_count: all_count,
+					time_voted: time_voted
+				});
+			}
+
+			voters.sort(function(a, b) {
+				const correctCompare = b.correct_count - a.correct_count;
+				return correctCompare == 0 ? a.time_voted - b.time_voted : correctCompare;
+			});
+
+			jqVoters = jQuery('#voters_list').empty();
+			let place = 0;
+			for(const voter of voters){
+				const jqRow = jQuery('<tr>');
+				jQuery('<td>').text(++place).appendTo(jqRow);
+				jQuery('<td>').text(voter.voter_name).appendTo(jqRow);
+				jQuery('<td>').text(voter.correct_count).appendTo(jqRow);
+				jQuery('<td>').text(voter.all_count).appendTo(jqRow);
+				jQuery('<td>').text(moment(voter.time_voted * 1000).format('DD.MM.YYYY HH:mm:ss')).appendTo(jqRow);
+
+				jqRow.appendTo(jqVoters);
+			};
+		}
+
+		function handleAnswerCorrectnessChange() {
+			const jqCheckbox = jQuery(this);
+
+			db.answers.update(
+				jqCheckbox.closest('tr').data('id'),
+				{is_correct: jqCheckbox.prop('checked')}
+			).then(refreshVoterList)
+		}
+
+		const db = new Dexie('pollData');
+		db.version(1).stores({
+			questions: '++id, &text',
+			answers: '++id, &[question_text+text], is_correct',
+			votes: '++id, time_voted, &[voter_name+question_text], answer_raw, answer_normalised'
+		});
+
+		jQuery(drop_dom_element).on('drop', handleDrop);
+		jQuery(drop_dom_element).on('dragover', handleDropOver);
+		jQuery(all_answers).on('change', 'input', handleAnswerCorrectnessChange);
+		jQuery('#button_delete_all').on('click', function(){
+			Promise.all([
+				db.answers.clear(),
+				db.questions.clear(),
+				db.votes.clear()
+			]).then(() => {
+				jQuery(all_answers).empty();
+				jQuery(voters_list).empty();
+			})
+		})
+		jQuery('#button_delete_votes').on('click', function(){
+			db.votes.clear().then(() => {
+				jQuery(voters_list).empty();
+			})
+		})
+
+		db.open()
+			.then(() => {
+				outputAllAnswers();
+				refreshVoterList();
+				
+				db.answers.count().then((answers) => console.log({answers}));
+				db.questions.count().then((questions) => console.log({questions}));
+				db.votes.count().then((votes) => console.log({votes}));
+			})
+	</script>
+</body>
+</html>
